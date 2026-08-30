@@ -547,7 +547,7 @@ try {
   console.log('OCR 解释器解析 OK')
 
   // ---- adapters/common ----
-  const { quotaToUsd, parseUserInfo, parseCheckinResult, classifyValidation, deriveAwardQuota, matchProxy } = await import('../models/adapters/common.js')
+  const { quotaToUsd, parseUserInfo, parseCheckinResult, classifyValidation, deriveAwardQuota, matchProxy, request } = await import('../models/adapters/common.js')
   // 代理域名匹配：hosts 关键字包含匹配；空数组 = 全部走代理；未配置 url = 不走
   const P = 'http://127.0.0.1:7890'
   assert.equal(matchProxy('anyrouter.top', { url: P, hosts: ['anyrouter'] }), P)
@@ -601,6 +601,40 @@ try {
   assert.match(r.msg, /站点没反应/)
   r = parseCheckinResult(0, null, { error: '请求超时（15 秒）' })
   assert.match(r.msg, /连不上/)
+
+  // 非 JSON 响应的诊断只保留响应形状，不能把查询参数或正文写进日志。
+  const savedFetch = global.fetch
+  const savedWarn = global.logger.warn
+  const savedAllowedPrivateHosts = cfg.security.allowedPrivateHosts
+  const diagnostics = []
+  global.logger.warn = (...args) => diagnostics.push(args.join(' '))
+  cfg.security.allowedPrivateHosts = ['x.com']
+  global.fetch = async () => ({
+    status: 200,
+    text: async () => '<html><title>Cloudflare</title></html>',
+    headers: { get: name => name.toLowerCase() === 'content-type' ? 'text/html; charset=utf-8' : null }
+  })
+  try {
+    const nonJson = await request('https://x.com/api/checkin?secret=do-not-log', { method: 'POST' })
+    assert.equal(nonJson.json, null)
+    assert.match(diagnostics[0], /POST \/api\/checkin 返回非 JSON：HTTP 200/)
+    assert.match(diagnostics[0], /Content-Type=text\/html; charset=utf-8.*类型=html,cloudflare/)
+    assert.doesNotMatch(diagnostics[0], /do-not-log|<html|Cloudflare/)
+
+    diagnostics.length = 0
+    global.fetch = async () => { throw new Error('mock network failure') }
+    await assert.rejects(
+      request('https://x.com/api/checkin?secret=do-not-log', { method: 'GET', maxRetry: 0 }),
+      /GET 请求失败/
+    )
+    assert.match(diagnostics[0], /GET \/api\/checkin 请求失败/)
+    assert.doesNotMatch(diagnostics[0], /do-not-log/)
+  } finally {
+    global.fetch = savedFetch
+    global.logger.warn = savedWarn
+    cfg.security.allowedPrivateHosts = savedAllowedPrivateHosts
+  }
+
   assert.equal(deriveAwardQuota(
     { quota: 1000000, usedQuota: 100000 },
     { quota: 1200000, usedQuota: 400000 }

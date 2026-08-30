@@ -72,6 +72,7 @@ async function proxiedRequest(url, { method, headers, body, timeoutMs, proxyUrl 
           json,
           contentType: String(res.headers['content-type'] || ''),
           textSnippet: json ? '' : text.slice(0, 512),
+          bodyLength: text.length,
           setCookies: Array.isArray(res.headers['set-cookie'])
             ? res.headers['set-cookie']
             : (res.headers['set-cookie'] ? [String(res.headers['set-cookie'])] : [])
@@ -86,6 +87,28 @@ async function proxiedRequest(url, { method, headers, body, timeoutMs, proxyUrl 
     if (body != null) req.write(body)
     req.end()
   })
+}
+
+/**
+ * 非 JSON 响应只记录形状，不记录正文：HTML 里可能回显用户信息，接口 URL 也可能带
+ * 一次性令牌。有限标记足够区分 Cloudflare 页面、登录页和普通空响应。
+ */
+function requestPathname(targetUrl) {
+  try { return new URL(targetUrl).pathname || '/' } catch { return '[invalid-url]' }
+}
+
+function logNonJsonResponse(method, targetUrl, response) {
+  if (response?.json != null) return
+  const snippet = String(response?.textSnippet || '')
+  const markers = [
+    /<!doctype\s+html|<html[\s>]/i.test(snippet) ? 'html' : '',
+    /cloudflare|turnstile|challenge-platform/i.test(snippet) ? 'cloudflare' : '',
+    /登录|login|sign[ -]?in/i.test(snippet) ? 'login' : ''
+  ].filter(Boolean)
+  logger.warn(`[relay-checkin-plugin] ${method} ${requestPathname(targetUrl)} 返回非 JSON：`
+    + `HTTP ${response?.status ?? '?'}｜Content-Type=${response?.contentType || '未知'}`
+    + `｜长度=${Number.isFinite(response?.bodyLength) ? response.bodyLength : '未知'}`
+    + `｜类型=${markers.join(',') || '未知'}`)
 }
 
 /**
@@ -121,13 +144,15 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (proxyUrl) {
       try {
-        return await proxiedRequest(targetUrl, {
+        const response = await proxiedRequest(targetUrl, {
           method: normalizedMethod,
           headers: fullHeaders,
           body: requestBody,
           timeoutMs: tMs,
           proxyUrl
         })
+        logNonJsonResponse(normalizedMethod, targetUrl, response)
+        return response
       } catch (err) {
         lastErr = err
         continue
@@ -155,13 +180,16 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
       } else {
         try { json = await res.json() } catch { /* 测试桩或非 JSON 响应 */ }
       }
-      return {
+      const response = {
         status: res.status,
         json,
         contentType: String(res.headers?.get?.('content-type') || ''),
         textSnippet: json ? '' : text.slice(0, 512),
+        bodyLength: text.length,
         setCookies: responseSetCookies(res.headers)
       }
+      logNonJsonResponse(normalizedMethod, targetUrl, response)
+      return response
     } catch (err) {
       lastErr = timedOut
         ? new Error(`请求超时（${tMs / 1000} 秒）`)
@@ -171,7 +199,7 @@ export async function request(url, { method = 'GET', headers = {}, body = null, 
     }
   }
   // 用户只会看到「连不上」这类人话，真实原因（超时/DNS/证书）只有这里留得住
-  logger.warn(`[relay-checkin-plugin] ${normalizedMethod} ${targetUrl} 请求失败: ${lastErr?.message || lastErr}`)
+  logger.warn(`[relay-checkin-plugin] ${normalizedMethod} ${requestPathname(targetUrl)} 请求失败: ${lastErr?.message || lastErr}`)
   throw new Error(`${normalizedMethod} 请求失败: ${lastErr?.message || lastErr}`)
 }
 
