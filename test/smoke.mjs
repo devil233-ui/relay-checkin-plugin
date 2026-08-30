@@ -413,6 +413,11 @@ try {
     { x: 262, y: 332 },
     'Turnstile 复选框应按实际 widget 矩形计算中心坐标'
   )
+  assert.deepEqual(
+    detachedWidgetClickPoint({ x: 240, y: 300, width: 300, height: 72, point: { x: 258, y: 334 } }),
+    { x: 258, y: 334 },
+    '无障碍树取得精确 checkbox 坐标时应优先使用，不再套固定偏移'
+  )
 
   // Linux 上 xdotool 可能在 Yunzai 已启动后才安装；一次 ENOENT 不应让后续轮次永久退化为手动。
   if (process.platform === 'linux' && !spawnSync('xdotool', ['-h'], { stdio: 'ignore' }).error) {

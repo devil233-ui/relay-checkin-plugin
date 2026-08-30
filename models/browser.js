@@ -546,14 +546,14 @@ export async function bypassServiceWorkerCompat(page) {
  * Puppeteer 20 之前没有 Frame.frameElement()。旧版仍暴露 frame id 与页面 CDP
  * 客户端，可由 DOM.getFrameOwner 取得跨域 iframe 的真实屏幕坐标。
  */
-export async function legacyFrameOwnerBox(page, frame) {
+export async function legacyFrameOwnerBox(page, frame, { timeoutMs = 5000 } = {}) {
   const frameId = frame?._id || frame?._frameId || (typeof frame?.id === 'function' ? frame.id() : null)
   const client = pageCdpClient(page)
   if (!frameId || !client || typeof client.send !== 'function') return null
 
   const owner = await withTimeout(
     client.send('DOM.getFrameOwner', { frameId }),
-    5000,
+    timeoutMs,
     '旧版 Puppeteer 定位 Turnstile frame 超时'
   )
   const node = owner?.backendNodeId
@@ -565,7 +565,7 @@ export async function legacyFrameOwnerBox(page, frame) {
 
   const result = await withTimeout(
     client.send('DOM.getBoxModel', node),
-    5000,
+    timeoutMs,
     '旧版 Puppeteer 读取 Turnstile 坐标超时'
   )
   const quad = result?.model?.border || result?.model?.content
@@ -584,7 +584,7 @@ export async function legacyFrameOwnerBox(page, frame) {
  * Chrome 无障碍树会在控件真正可交互后暴露 checkbox 节点；其坐标相对 iframe，
  * 加上 frame owner 坐标即可得到页面鼠标所需的精确位置。
  */
-export async function turnstileCheckboxPoint(page, frame, ownerBox) {
+export async function turnstileCheckboxPoint(page, frame, ownerBox, { timeoutMs = 5000 } = {}) {
   const frameId = frame?._id || frame?._frameId || (typeof frame?.id === 'function' ? frame.id() : null)
   let client = null
   try {
@@ -599,7 +599,7 @@ export async function turnstileCheckboxPoint(page, frame, ownerBox) {
 
   const tree = await withTimeout(
     client.send('Accessibility.getFullAXTree', { frameId }),
-    5000,
+    timeoutMs,
     '等待 Turnstile 复选框可交互超时'
   )
   const checkbox = tree?.nodes?.find(node => node?.role?.value === 'checkbox' && !node.ignored)
@@ -607,7 +607,7 @@ export async function turnstileCheckboxPoint(page, frame, ownerBox) {
 
   const result = await withTimeout(
     client.send('DOM.getBoxModel', { backendNodeId: checkbox.backendDOMNodeId }),
-    5000,
+    timeoutMs,
     '读取 Turnstile 复选框坐标超时'
   )
   const quad = result?.model?.border || result?.model?.content
@@ -1600,6 +1600,9 @@ const DETACHED_WIDGET = { left: 240, top: 300, width: 300, height: 65, boxX: 22,
  */
 export function detachedWidgetClickPoint(widget = null) {
   const box = widget || DETACHED_WIDGET
+  if (widget?.point && Number.isFinite(widget.point.x) && Number.isFinite(widget.point.y)) {
+    return { x: widget.point.x, y: widget.point.y }
+  }
   const x = Number.isFinite(box.x) ? box.x : box.left
   const y = Number.isFinite(box.y) ? box.y : box.top
   const width = Number.isFinite(box.width) ? box.width : DETACHED_WIDGET.width
@@ -1844,7 +1847,10 @@ async function closeDetachedBrowser(ws, proc) {
 async function readDetachedWidget(page, timeoutMs = 6000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const widget = await page.evaluate(() => {
+    const remaining = deadline - Date.now()
+    const exact = await readDetachedCheckboxPoint(page, Math.min(1200, remaining))
+    if (exact) return exact
+    const holder = await withTimeout(page.evaluate(() => {
       const holder = document.getElementById('relay-checkin-turnstile-holder')
       if (!holder) return null
       const iframe = [...holder.querySelectorAll('iframe')].find(item => {
@@ -1859,9 +1865,60 @@ async function readDetachedWidget(page, timeoutMs = 6000) {
         width: Math.round(rect.width),
         height: Math.round(rect.height)
       }
-    }).catch(() => null)
-    if (widget) return widget
+    }), Math.min(1000, Math.max(1, deadline - Date.now())), '读取 Turnstile 容器坐标超时').catch(() => null)
+    if (holder) return holder
     await waitMs(250)
+  }
+  return null
+}
+
+/**
+ * 在断开 CDP 前借助无障碍树读取 Turnstile iframe 内真实 checkbox 的视口坐标。
+ * iframe 往往藏在 closed shadow root，页面 DOM 看不到它，但 frame tree/AX tree 仍可见。
+ */
+async function readDetachedCheckboxPoint(page, timeoutMs = 1200) {
+  const deadline = Date.now() + timeoutMs
+  const frames = typeof page.frames === 'function'
+    ? page.frames().filter(frame => /challenges\.cloudflare\.com|turnstile/i.test(String(frame.url?.() || '')))
+    : []
+  for (const frame of frames) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    let owner = null
+    try {
+      let ownerBox = null
+      if (typeof frame?.frameElement === 'function') {
+        owner = await withTimeout(frame.frameElement(), Math.min(700, remaining), '定位 Turnstile iframe 超时')
+        ownerBox = owner
+          ? await withTimeout(owner.boundingBox(), Math.min(700, Math.max(1, deadline - Date.now())), '读取 Turnstile iframe 坐标超时')
+          : null
+      } else {
+        ownerBox = await legacyFrameOwnerBox(page, frame, {
+          timeoutMs: Math.min(700, Math.max(1, deadline - Date.now()))
+        })
+      }
+      if (!ownerBox || ownerBox.width < 200 || ownerBox.height < 50) continue
+      const ready = await turnstileCheckboxPoint(page, frame, ownerBox, {
+        timeoutMs: Math.min(700, Math.max(1, deadline - Date.now()))
+      })
+      if (ready?.point) {
+        return {
+          source: 'ax-checkbox',
+          x: Math.round(ownerBox.x),
+          y: Math.round(ownerBox.y),
+          width: Math.round(ownerBox.width),
+          height: Math.round(ownerBox.height),
+          point: {
+            x: Math.round(ready.point.x),
+            y: Math.round(ready.point.y)
+          }
+        }
+      }
+    } catch {
+      // iframe/AX 树在重建时会短暂失效，交给下一轮轮询或 holder 回退
+    } finally {
+      try { await owner?.dispose?.() } catch { /* frame 可能已经重建 */ }
+    }
   }
   return null
 }
