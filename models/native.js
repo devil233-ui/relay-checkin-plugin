@@ -56,10 +56,21 @@ public class RelayNative {
 const PS_CANDIDATES = ['powershell.exe', 'pwsh.exe']
 let psExecutable = null
 
-/** 真实指针整体不可用（缺 xdotool / 缺 PowerShell），置位后不再重复尝试 */
+/**
+ * 真实指针整体暂不可用（缺 xdotool / 缺 PowerShell）。Linux 上工具可能在进程运行
+ * 期间才安装，不能把一次 ENOENT 永久当成不可用；nativePointerUnavailable() 会刷新状态。
+ */
 let pointerUnavailable = false
 
+function refreshPointerAvailability() {
+  if (!pointerUnavailable || process.platform !== 'linux') return
+  // 只探测可执行文件是否已经出现，不连接 X server，避免 DISPLAY 不可用时误判。
+  const probe = spawnSync('xdotool', ['-h'], { stdio: 'ignore' })
+  if (!probe.error || probe.error.code !== 'ENOENT') pointerUnavailable = false
+}
+
 export function nativePointerUnavailable() {
+  refreshPointerAvailability()
   return pointerUnavailable
 }
 
@@ -244,7 +255,7 @@ export function windowsClickCommand(x, y, windowId = '') {
  * @returns {Promise<boolean>} 点击是否成功执行
  */
 export async function nativeClick(display, x, y, { windowId = '' } = {}) {
-  if (!display || pointerUnavailable) return false
+  if (!display || nativePointerUnavailable()) return false
   if (display !== POINTER_WINDOWS) return await xdotoolClick(display, x, y, windowId)
   // Add-Type 首次编译要一两秒，超时给足；点击自身的时序全在脚本内部控制
   const res = await runPowerShell(windowsClickCommand(x, y, windowId), 25000)
@@ -286,7 +297,7 @@ $origin = New-Object 'RelayNative+POINT'
  * @returns {Promise<{windowId:string,x:number,y:number,width:number,height:number}|null>}
  */
 export async function nativeWindowGeometry(display, title) {
-  if (!display || pointerUnavailable) return null
+  if (!display || nativePointerUnavailable()) return null
   if (display === POINTER_WINDOWS) {
     const res = await runPowerShell(windowsWindowGeometryCommand(title), 25000)
     return res.ok ? parseShellGeometry(res.stdout) : null
@@ -305,7 +316,7 @@ export async function nativeWindowGeometry(display, title) {
  * @returns {Promise<string>} 形如 `(270, 332)`，取不到时为空串
  */
 export async function nativeMouseLocation(display) {
-  if (!display || pointerUnavailable) return ''
+  if (!display || nativePointerUnavailable()) return ''
   if (display === POINTER_WINDOWS) {
     const res = await runPowerShell(`${PS_USER32}
 $point = New-Object 'RelayNative+POINT'

@@ -3,6 +3,7 @@
  * 运行：node test/smoke.mjs（在插件根目录）
  */
 import assert from 'node:assert'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -379,6 +380,8 @@ try {
     parseShellGeometry,
     parsePointerLocation,
     pointerPath,
+    nativeClick,
+    nativePointerUnavailable,
     windowsClickCommand,
     windowsWindowGeometryCommand
   } = await import('../models/native.js')
@@ -396,6 +399,18 @@ try {
   )
   assert.equal(pointerDisplayFor(null, { platform: 'linux', env: {} }), '', '无桌面且无虚拟屏只能手动点')
   assert.equal(pointerDisplayFor(null, { platform: 'darwin', env: {} }), '', 'macOS 没有可用的原生指针工具')
+
+  // Linux 上 xdotool 可能在 Yunzai 已启动后才安装；一次 ENOENT 不应让后续轮次永久退化为手动。
+  if (process.platform === 'linux' && !spawnSync('xdotool', ['-h'], { stdio: 'ignore' }).error) {
+    const savedPath = process.env.PATH
+    try {
+      process.env.PATH = '/definitely-missing'
+      await nativeClick(':99', 1, 1)
+    } finally {
+      process.env.PATH = savedPath
+    }
+    assert.equal(nativePointerUnavailable(), false, 'xdotool 恢复后应重新启用原生指针')
+  }
 
   // Windows 的命令行会给含空格的路径加引号，分隔符与大小写也都不固定
   const winProfile = 'C:\\Users\\Bot 1\\Yunzai\\data\\browser-profile\\abc123'
