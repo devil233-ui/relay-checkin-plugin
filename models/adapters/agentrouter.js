@@ -1,4 +1,5 @@
-import { request, parseUserInfo } from './common.js'
+import { request, parseUserInfo, isAliyunWafPage } from './common.js'
+import { logger } from '../../host/index.js'
 
 /**
  * AgentRouter 的 $25 签到发生在一次真正的新登录中。
@@ -52,7 +53,13 @@ const adapter = {
 
     const json = res.json
     if (!json?.success || !json?.data) {
-      return { ok: false, already: false, msg: loginError(res.status, json) }
+      if (isAliyunWafPage(res)) {
+        logger.warn(`[relay-checkin-plugin] ${account.baseUrl} 的登录接口被阿里云 WAF 拦下`
+          + `（HTTP ${res.status}，返回滑块验证页而不是 JSON）：该站已开启滑动验证，`
+          + '纯 HTTP 与本机浏览器都过不去；换一个非数据中心出口（proxy.url）即可恢复，'
+          + 'Cookie 模式同样被拦，不是替代方案')
+      }
+      return { ok: false, already: false, msg: loginError(res.status, json, res) }
     }
 
     const data = json.data
@@ -90,7 +97,16 @@ const adapter = {
   async checkin(account) {
     if (hasEmailLogin(account)) return await this.login(account)
 
-    const info = await this.userInfo(account)
+    const res = await request(`${account.baseUrl}/api/user/self`, {
+      headers: this.buildHeaders(account)
+    })
+    if (isAliyunWafPage(res)) {
+      logger.warn(`[relay-checkin-plugin] ${account.baseUrl} 的用户接口被阿里云 WAF 拦下`
+        + `（HTTP ${res.status}，返回滑块验证页）：这台机器过不去该站的滑动验证，`
+        + '在 proxy.url 配一个非数据中心出口后重试')
+      return { ok: false, already: false, msg: '这站挂了滑动验证，嘟嘟连余额都查不到呀，给嘟嘟配个代理吧' }
+    }
+    const info = parseUserInfo(res.json)
     if (!info.ok) return { ok: false, already: false, msg: info.msg || 'Session 不好用了呀，重新绑一下吧' }
     return {
       ok: true,
@@ -140,9 +156,11 @@ async function readLoginAwardQuota(account) {
   }
 }
 
-function loginError(status, json) {
+export function loginError(status, json, response = null) {
   const msg = json?.message || json?.msg
   if (msg) return `登录失败：${msg}`
+  // WAF 拦截页也是 HTTP 200，先认出来再谈状态码，否则用户只看到「响应异常」
+  if (isAliyunWafPage(response)) return '这站挂了滑动验证，嘟嘟过不去呀，给嘟嘟配个代理再试试~'
   if (status === 401 || status === 403) return `登录失败：邮箱或密码无效 (HTTP ${status})`
   if (status === 404) return '站点没有邮箱登录接口'
   return `登录响应异常 (HTTP ${status})`

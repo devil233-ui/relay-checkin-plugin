@@ -680,6 +680,29 @@ try {
     { quota: 1000000, usedQuota: 100000 },
     { quota: 1200000, usedQuota: 400000 }
   ), 500000, '奖励推导应抵消签到期间的正常消费')
+
+  // 阿里云 WAF 拦截页也是 HTTP 200 + text/html，必须能与「站点响应异常」区分开
+  const { isAliyunWafPage } = await import('../models/adapters/common.js')
+  const WAF_SNIPPET = '<!doctype html>\n<meta charset="UTF-8">\n'
+    + '<meta name="aliyun_waf_aa" content="ff926c7f07e45e2e487a29a6197d3460">'
+  assert.equal(isAliyunWafPage({ status: 200, json: null, textSnippet: WAF_SNIPPET }), true,
+    '带 aliyun_waf_* 埋点的 200 拦截页必须识别为 WAF')
+  assert.equal(isAliyunWafPage({ status: 200, json: null, textSnippet: '<html><body>Access Verification</body></html>' }), true,
+    '滑块验证页的英文标题同样要认出来')
+  assert.equal(isAliyunWafPage({ status: 200, json: { success: true }, textSnippet: WAF_SNIPPET }), false,
+    '拿到 JSON 就说明已穿过 WAF，不能再判成拦截')
+  assert.equal(isAliyunWafPage({ status: 502, json: null, textSnippet: '<html>bad gateway</html>' }), false,
+    '普通 HTML 错误页不是 WAF 拦截')
+
+  const { loginError } = await import('../models/adapters/agentrouter.js')
+  assert.match(
+    loginError(200, null, { status: 200, json: null, textSnippet: WAF_SNIPPET }),
+    /滑动验证/,
+    'WAF 拦截时要告诉用户站点挂了滑动验证，而不是「登录响应异常」'
+  )
+  assert.match(loginError(200, null, { status: 200, json: null, textSnippet: '' }), /登录响应异常/,
+    '非 WAF 的异常响应仍保留原提示')
+  assert.match(loginError(401, null), /邮箱或密码无效/, '凭据错误的提示不受影响')
   console.log('adapters/common OK')
 
   // ---- adapters/index ----

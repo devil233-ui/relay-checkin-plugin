@@ -97,12 +97,26 @@ function requestPathname(targetUrl) {
   try { return new URL(targetUrl).pathname || '/' } catch { return '[invalid-url]' }
 }
 
+/**
+ * 阿里云 WAF 的拦截页：HTTP 仍是 200、Content-Type 是 text/html，
+ * 正文带 aliyun_waf_* 埋点或滑块验证组件。只看 status 会误判成「站点响应异常」，
+ * 因此单独识别，让上层能给出「这站挂了 WAF」而不是含糊的 HTTP 提示。
+ * @param {{json?: object|null, textSnippet?: string}} response request() 的返回值
+ */
+export function isAliyunWafPage(response) {
+  if (response?.json != null) return false
+  const snippet = String(response?.textSnippet || '')
+  if (!snippet) return false
+  return /aliyun_waf_(?:aa|bb)|aliyunCaptcha|acw_sc__v2|Access Verification/i.test(snippet)
+}
+
 function logNonJsonResponse(method, targetUrl, response) {
   if (response?.json != null) return
   const snippet = String(response?.textSnippet || '')
   const markers = [
     /<!doctype\s+html|<html[\s>]/i.test(snippet) ? 'html' : '',
     /cloudflare|turnstile|challenge-platform/i.test(snippet) ? 'cloudflare' : '',
+    isAliyunWafPage(response) ? 'aliyun-waf' : '',
     /登录|login|sign[ -]?in/i.test(snippet) ? 'login' : ''
   ].filter(Boolean)
   logger.warn(`[relay-checkin-plugin] ${method} ${requestPathname(targetUrl)} 返回非 JSON：`
