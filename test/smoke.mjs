@@ -83,7 +83,8 @@ try {
     resolveBrowserExecutable,
     newPageSafe,
     turnstileBrowserMode,
-    browserExecutableVersion
+    browserExecutableVersion,
+    staleTurnstileKernel
   } = await import('../models/browser.js')
   assert.equal(
     browserPoolKey({ proxyServer: '', profileKey: 'ioll.pp.ua' }),
@@ -131,6 +132,24 @@ try {
       return { stdout: '151.0.4129.59\r\n', stderr: '', status: 0 }
     }
   }), '151.0.4129.59', '应正确读取 Windows 浏览器文件版本')
+  assert.equal(
+    staleTurnstileKernel('Chrome/152.0.7977.64'),
+    '',
+    '新版内核不应被判成过旧'
+  )
+  assert.ok(
+    staleTurnstileKernel('HeadlessChrome/101.0.4950.0', true).includes('101.0.4950.0'),
+    'Puppeteer 自带的旧 Chromium 必须给出带版本号的过旧结论'
+  )
+  assert.ok(
+    staleTurnstileKernel('HeadlessChrome/101.0.4950.0', true).includes('Puppeteer 自带'),
+    '用自带内核时的提示要点明升级办法不同于系统浏览器'
+  )
+  assert.equal(
+    staleTurnstileKernel(''),
+    '',
+    '读不到版本时不应误报过旧，避免掩盖真实失败原因'
+  )
   let createdExtraPage = false
   const initialBlank = { url: () => 'about:blank' }
   assert.equal(await newPageSafe({

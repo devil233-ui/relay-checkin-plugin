@@ -46,7 +46,15 @@ git clone --depth=1 https://gitcode.com/ccxhan/relay-checkin-plugin ./plugins/re
 | Windows 10 / 11 | 无需安装 | 用系统自带 PowerShell 调 user32 指针。要在**已登录的桌面会话**里跑 Yunzai，装成 Windows 服务会起不来浏览器 |
 | macOS | — | 没有免安装的指针工具，需要自己在弹出的窗口里点一下 |
 
-另外建议装最新的 Chrome 或 Edge，Turnstile 会拒绝过旧内核。
+还必须有一个较新的 Chrome / Edge：Turnstile 会拒绝过旧内核，TRSS-Yunzai 内置 Puppeteer 自带的
+Chromium 往往是数年前的构建（实测 Chromium 101 点完复选框只回 `600010`，换 Chrome 152 立刻签发 token）。
+系统里装好后插件会自动选用版本最高的那个，也可以用 `browser.executablePath` 显式指定。
+
+```bash
+# Debian / Ubuntu 服务器
+curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
+apt install -y /tmp/chrome.deb
+```
 
 ### 图形验证码（可选）
 

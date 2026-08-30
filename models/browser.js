@@ -206,6 +206,50 @@ export function resolveBrowserExecutable(configured = '', {
     ?.executablePath || null
 }
 
+/**
+ * Turnstile 能接受的内核下限。实测同一台 Xvfb 服务器、同一站点、同一坐标：
+ * Puppeteer 13 自带的 Chromium 101 点完复选框只回 error-callback 600010，
+ * 换成 Chrome 152 后立刻签发 token。所以内核版本必须出现在日志和用户提示里，
+ * 否则这种失败只会被反复误判成坐标、指针或出口 IP 风控。
+ */
+const TURNSTILE_MIN_MAJOR = 120
+
+// 最近一次启动过码浏览器时得出的「内核过旧」结论，空串表示内核可用
+let staleKernelNotice = ''
+
+// 内核过旧时统一的用户可见文案：排障细节留在日志里，这里只说能怎么办
+const STALE_KERNEL_MESSAGE = '机器人那台电脑的浏览器内核太旧啦，装个新版 Chrome 再来试试~'
+
+/**
+ * 解析内核版本串并判断能否用于 Turnstile。
+ * @param {string} version 形如 Chrome/152.0.7977.64 或 HeadlessChrome/101.0.4950.0
+ * @param {boolean} bundled 是否为 Puppeteer 自带内核（升级办法不同，提示里要点明）
+ * @returns {string} 过旧时返回可直接写进日志的原因，够新时返回空串
+ */
+export function staleTurnstileKernel(version, bundled = false) {
+  const major = Number(String(version || '').match(/(\d+)\.\d/)?.[1] || 0)
+  if (!major || major >= TURNSTILE_MIN_MAJOR) return ''
+  return `过码内核是 ${String(version).trim()}，低于 Turnstile 可用下限 ${TURNSTILE_MIN_MAJOR}`
+    + '（这类内核点完复选框只会回 600010）'
+    + (bundled ? '；当前用的是 Puppeteer 自带 Chromium' : '')
+}
+
+/**
+ * 每次启动过码浏览器后记一次内核结论：过旧就 warn 出确切版本与升级办法；
+ * 够新则清掉上次结论，避免装好新 Chrome 后还在提示。
+ */
+async function noteBrowserKernel(browser, executablePath) {
+  const version = await withTimeout(browser.version(), 10000, '读取浏览器内核版本超时').catch(() => '')
+  staleKernelNotice = staleTurnstileKernel(version, !executablePath)
+  if (staleKernelNotice) {
+    logger.warn(`[relay-checkin-plugin] ${staleKernelNotice}：请给这台机器装新版 Chrome`
+      + '（Debian/Ubuntu: curl -fsSL'
+      + ' https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb'
+      + ' && apt install -y /tmp/chrome.deb），或把 browser.executablePath 指向已装好的新版内核')
+  }
+  return staleKernelNotice
+}
+
 // 反自动化检测：各项独立保护，任一项失败都不影响其余初始化。
 const STEALTH_SCRIPT = `
   try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }) } catch (e) {}
@@ -395,7 +439,10 @@ async function getBrowser(pool, proxy, { interactive = false, profileKey = '', e
         launchOptions.defaultViewport = null
         launchOptions.ignoreDefaultArgs = ['--enable-automation']
       }
-      return await puppeteer.launch(launchOptions)
+      const instance = await puppeteer.launch(launchOptions)
+      // 过码失败最常见的原因就是内核太旧，启动后先把版本结论固定下来
+      if (interactive) await noteBrowserKernel(instance, executablePath)
+      return instance
     })().then(inst => {
       pool.instance = inst
       pool.launching = null
@@ -1741,6 +1788,8 @@ function detachedTurnstilePageScript(cfg) {
  * 错误码、超时秒数、无头/可见这些排障信息一律留在日志里。
  */
 function turnstileFailureMessage(result, interactive = false) {
+  // 内核过旧时不管失败在哪一步都是同一个结论，直接说人话，别再让用户去猜网络
+  if (staleKernelNotice) return STALE_KERNEL_MESSAGE
   if (result?.reason === 'error-callback') {
     if (/^[36]\d{5}$/.test(result.errorCode || '')) {
       return '站点的人机验证不放行呀，换个网络或者晚点再试~'
@@ -1973,7 +2022,8 @@ export async function dumpDetachedFailure(ws, host, display, diagnostic = {}) {
     logger.warn(`[relay-checkin-plugin] ${host} 验证现场: 挑战轮次=${snapshot.round}`
       + `｜页面步骤=[${snapshot.steps.join(' → ') || '无'}]`
       + `｜Turnstile 组件=${snapshot.iframe}｜token 长度=${snapshot.tokenLen}`
-      + `｜指针停在=${mouse || '未知'}｜标题=${snapshot.title}${clickSummary}`)
+      + `｜指针停在=${mouse || '未知'}｜标题=${snapshot.title}${clickSummary}`
+      + `｜内核=${await withTimeout(browser.version(), 10000, '读取内核版本超时').catch(() => '未知')}`)
 
     const dir = path.join(dataPath(), 'turnstile-debug')
     fs.mkdirSync(dir, { recursive: true })
@@ -2173,6 +2223,8 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     const browser = await launchDetachedBrowser(puppeteer, launchOptions, { host, executablePath })
     chromeProc = browser.process()
     ws = browser.wsEndpoint()
+    // 断开 CDP 之后就问不到版本了，趁 attach 状态先把内核结论固定下来
+    await noteBrowserKernel(browser, executablePath)
 
     let geom = null
     let widget = null
@@ -2300,7 +2352,9 @@ async function detachedTurnstileCheckin(account, { checkinPath, headers, validat
     await dumpDetachedFailure(ws, host, pointerDisplay, { clickAttempts, lastClick })
     return {
       turnstileFailed: true,
-      message: `人机验证没做完呀${autoClick ? '，晚点再试试~' : '，要在机器人那台电脑上点一下哦'}`,
+      message: staleKernelNotice
+        ? STALE_KERNEL_MESSAGE
+        : `人机验证没做完呀${autoClick ? '，晚点再试试~' : '，要在机器人那台电脑上点一下哦'}`,
       detail: { stage: 'detached', reason: 'timeout', clickAttempts }
     }
   } finally {
