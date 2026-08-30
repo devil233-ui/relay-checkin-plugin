@@ -270,11 +270,15 @@ export async function nativeClick(display, x, y, { windowId = '' } = {}) {
  * 返回的是**客户区**矩形（屏幕坐标 + 客户区尺寸），于是 detachedClickOrigin 里的
  * `height - innerHeight` 正好是标签栏 + 地址栏的高度，`width - innerWidth` 约为 0。
  */
-export function windowsWindowGeometryCommand(title) {
+export function windowsWindowGeometryCommand(title, pid = '') {
   // -like 的通配符只有 * ? []，窗口标题里是站点域名和固定前缀，不含这些
   const literal = String(title).replace(/'/g, "''")
+  const numericPid = Number(pid)
+  const selector = Number.isSafeInteger(numericPid) && numericPid > 0
+    ? `$proc = Get-Process -Id ${numericPid} -ErrorAction SilentlyContinue | Select-Object -First 1`
+    : `$proc = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*${literal}*' } | Select-Object -First 1`
   return `${PS_USER32}
-$proc = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*${literal}*' } | Select-Object -First 1
+${selector}
 if (-not $proc) { exit 3 }
 $hwnd = $proc.MainWindowHandle
 $rect = New-Object 'RelayNative+RECT'
@@ -294,20 +298,36 @@ $origin = New-Object 'RelayNative+POINT'
  * Chrome 自报的 outerHeight - innerHeight 并不可靠（没有窗口管理器的 Xvfb 上可能为 0，
  * 算出的点击点整体偏上、正好落在提示文字上——于是「点了却毫无反应」，Turnstile 连
  * error-callback 都不会触发）。系统给的数据不会骗人。
+ * @param {{pid?: string|number}} opts 可选 Chrome 主进程 PID；站点覆盖标题时优先按 PID 找
  * @returns {Promise<{windowId:string,x:number,y:number,width:number,height:number}|null>}
  */
-export async function nativeWindowGeometry(display, title) {
+export async function nativeWindowGeometry(display, title, { pid = '' } = {}) {
   if (!display || nativePointerUnavailable()) return null
   if (display === POINTER_WINDOWS) {
-    const res = await runPowerShell(windowsWindowGeometryCommand(title), 25000)
+    const res = await runPowerShell(windowsWindowGeometryCommand(title, pid), 25000)
     return res.ok ? parseShellGeometry(res.stdout) : null
   }
-  const res = await runCommand(
-    'xdotool',
-    ['search', '--onlyvisible', '--name', title, 'getwindowgeometry', '--shell'],
-    { timeoutMs: 8000, env: { ...process.env, DISPLAY: display } }
-  )
-  return parseShellGeometry(res.stdout)
+  // 站点脚本可能在导航后覆盖 document.title，优先按 Chrome 主进程 PID 找窗口，
+  // 标题查询仅作旧环境/找不到 PID 窗口时的后备。
+  for (const args of xdotoolWindowSearchArgs(title, pid)) {
+    const res = await runCommand('xdotool', args, {
+      timeoutMs: 8000,
+      env: { ...process.env, DISPLAY: display }
+    })
+    const geometry = parseShellGeometry(res.stdout)
+    if (geometry) return geometry
+  }
+  return null
+}
+
+/**
+ * 生成 xdotool 窗口查询参数。单独导出便于在无 X server 的环境验证 PID 优先级与标题回退。
+ */
+export function xdotoolWindowSearchArgs(title, pid = '') {
+  const queries = []
+  if (pid) queries.push(['search', '--onlyvisible', '--pid', String(pid), '.', 'getwindowgeometry', '--shell'])
+  if (title) queries.push(['search', '--onlyvisible', '--name', title, 'getwindowgeometry', '--shell'])
+  return queries
 }
 
 /**

@@ -382,10 +382,11 @@ try {
     pointerPath,
     nativeClick,
     nativePointerUnavailable,
+    xdotoolWindowSearchArgs,
     windowsClickCommand,
     windowsWindowGeometryCommand
   } = await import('../models/native.js')
-  const { detachedClickOrigin } = await import('../models/browser.js')
+  const { detachedClickOrigin, detachedWidgetClickPoint } = await import('../models/browser.js')
 
   assert.equal(pointerDisplayFor(':99'), ':99', '自建虚拟屏优先')
   assert.equal(
@@ -399,6 +400,19 @@ try {
   )
   assert.equal(pointerDisplayFor(null, { platform: 'linux', env: {} }), '', '无桌面且无虚拟屏只能手动点')
   assert.equal(pointerDisplayFor(null, { platform: 'darwin', env: {} }), '', 'macOS 没有可用的原生指针工具')
+  assert.deepEqual(
+    xdotoolWindowSearchArgs('relay-checkin tabitoken.com', 12345),
+    [
+      ['search', '--onlyvisible', '--pid', '12345', '.', 'getwindowgeometry', '--shell'],
+      ['search', '--onlyvisible', '--name', 'relay-checkin tabitoken.com', 'getwindowgeometry', '--shell']
+    ],
+    '窗口标题可能被站点覆盖时应先按 Chrome PID 查询，再回退标题'
+  )
+  assert.deepEqual(
+    detachedWidgetClickPoint({ x: 240, y: 300, width: 300, height: 65 }),
+    { x: 262, y: 332 },
+    'Turnstile 复选框应按实际 widget 矩形计算中心坐标'
+  )
 
   // Linux 上 xdotool 可能在 Yunzai 已启动后才安装；一次 ENOENT 不应让后续轮次永久退化为手动。
   if (process.platform === 'linux' && !spawnSync('xdotool', ['-h'], { stdio: 'ignore' }).error) {
@@ -511,6 +525,9 @@ try {
     geometryScript.includes('GetClientRect') && geometryScript.includes('ClientToScreen'),
     'Windows 侧要返回客户区矩形的屏幕坐标'
   )
+  const pidGeometryScript = windowsWindowGeometryCommand('title may change', 65552)
+  assert.ok(pidGeometryScript.includes('Get-Process -Id 65552'), 'Windows 站点覆盖标题时应按 Chrome PID 找窗口')
+  assert.doesNotMatch(pidGeometryScript, /MainWindowTitle -like/, '按 PID 查询时不应再依赖窗口标题')
 
   // Windows 返回客户区（frameW≈0，frameH=标签栏+地址栏）；Linux 返回窗口外框（左右各半边框）
   assert.deepEqual(
