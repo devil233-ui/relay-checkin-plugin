@@ -54,9 +54,16 @@ git clone --depth=1 https://gitcode.com/ccxhan/relay-checkin-plugin ./plugins/re
 
 ```bash
 cd plugins/relay-checkin-plugin
-python3 -m venv .venv && .venv/bin/pip install ddddocr   # Linux / macOS
+# 推荐：系统 Python 3.14 的 ensurepip 可能携带不兼容的旧 pip
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python ddddocr
+# 已有 Python 3.13 或更低版本且 venv 正常时，也可使用：
+# python3 -m venv .venv && .venv/bin/python -m pip install ddddocr
 py -m venv .venv && .venv\Scripts\pip install ddddocr    # Windows
 ```
+
+系统 Python 3.14 如果执行 `python3 -m venv` 后没有 `pip`，通常是 `ensurepip` 携带的
+旧版 pip 仍引用已移除的 `pkgutil.ImpImporter`；请按上面的 uv 方式使用 Python 3.13。
 
 ### 装在 Yunzai NG 上
 
